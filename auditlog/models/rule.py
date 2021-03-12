@@ -196,6 +196,19 @@ class AuditlogRule(models.Model):
         self.unsubscribe()
         return super(AuditlogRule, self).unlink()
 
+    @api.model
+    def get_auditlog_fields(self, model):
+        """
+        Get the list of auditlog fields for a model
+        By default it is all stored fields only, but you can
+        override this.
+        """
+        return list(
+            n
+            for n, f in model._fields.iteritems()
+            if (not f.compute and not f.related) or f.store
+        )
+
     @api.multi
     def _make_create(self):
         """Instanciate a create method that log its calls."""
@@ -208,9 +221,10 @@ class AuditlogRule(models.Model):
             self = self.with_context(auditlog_disabled=True)
             rule_model = self.env['auditlog.rule']
             new_record = create_full.origin(self, vals, **kwargs)
+            fields_list = rule_model.get_auditlog_fields(self)
             new_values = dict(
                 (d['id'], d) for d in new_record.sudo()
-                .with_context(prefetch_fields=False).read(list(self._fields)))
+                .with_context(prefetch_fields=False).read(fields_list))
             rule_model.sudo().create_logs(
                 self.env.uid, self._name, new_record.ids,
                 'create', None, new_values, {'log_type': log_type})
@@ -237,25 +251,43 @@ class AuditlogRule(models.Model):
         self.ensure_one()
         log_type = self.log_type
 
-        def read(self, fields=None, load='_classic_read', **kwargs):
-            result = read.origin(self, fields, load, **kwargs)
+        def read(self, *args, **kwargs):
+            result = read.origin(self, *args, **kwargs)
             # Sometimes the result is not a list but a dictionary
             # Also, we can not modify the current result as it will break calls
             result2 = result
             if not isinstance(result2, list):
                 result2 = [result]
             read_values = dict((d['id'], d) for d in result2)
-            # If the call came from auditlog itself, skip logging:
-            # avoid logs on `read` produced by auditlog during internal
-            # processing: read data of relevant records, 'ir.model',
-            # 'ir.model.fields'... (no interest in logging such operations)
-            if self.env.context.get('auditlog_disabled'):
-                return result
-            self = self.with_context(auditlog_disabled=True)
-            rule_model = self.env['auditlog.rule']
-            rule_model.sudo().create_logs(
-                self.env.uid, self._name, self.ids,
-                'read', read_values, None, {'log_type': log_type})
+            # Old API
+            if args and isinstance(args[0], sql_db.Cursor):
+                cr, uid, ids = args[0], args[1], args[2]
+                if isinstance(ids, (int, long)):
+                    ids = [ids]
+                # If the call came from auditlog itself, skip logging:
+                # avoid logs on `read` produced by auditlog during internal
+                # processing: read data of relevant records, 'ir.model',
+                # 'ir.model.fields'... (no interest in logging such operations)
+                if kwargs.get('context', {}).get('auditlog_disabled'):
+                    return result
+                env = api.Environment(cr, uid, {'auditlog_disabled': True})
+                rule_model = env['auditlog.rule']
+                rule_model.sudo().create_logs(
+                    env.uid, self._name, ids,
+                    'read', read_values, None, {'log_type': log_type})
+            # New API
+            else:
+                # If the call came from auditlog itself, skip logging:
+                # avoid logs on `read` produced by auditlog during internal
+                # processing: read data of relevant records, 'ir.model',
+                # 'ir.model.fields'... (no interest in logging such operations)
+                if self.env.context.get('auditlog_disabled'):
+                    return result
+                self = self.with_context(auditlog_disabled=True)
+                rule_model = self.env['auditlog.rule']
+                rule_model.sudo().create_logs(
+                    self.env.uid, self._name, self.ids,
+                    'read', read_values, None, {'log_type': log_type})
             return result
         return read
 
@@ -269,13 +301,14 @@ class AuditlogRule(models.Model):
         def write_full(self, vals, **kwargs):
             self = self.with_context(auditlog_disabled=True)
             rule_model = self.env['auditlog.rule']
+            fields_list = rule_model.get_auditlog_fields(self)
             old_values = dict(
                 (d['id'], d) for d in self.sudo()
-                .with_context(prefetch_fields=False).read(list(self._fields)))
+                .with_context(prefetch_fields=False).read(fields_list))
             result = write_full.origin(self, vals, **kwargs)
             new_values = dict(
                 (d['id'], d) for d in self.sudo()
-                .with_context(prefetch_fields=False).read(list(self._fields)))
+                .with_context(prefetch_fields=False).read(fields_list))
             rule_model.sudo().create_logs(
                 self.env.uid, self._name, self.ids,
                 'write', old_values, new_values, {'log_type': log_type})
@@ -310,9 +343,10 @@ class AuditlogRule(models.Model):
         def unlink_full(self, **kwargs):
             self = self.with_context(auditlog_disabled=True)
             rule_model = self.env['auditlog.rule']
+            fields_list = rule_model.get_auditlog_fields(self)
             old_values = dict(
                 (d['id'], d) for d in self.sudo()
-                .with_context(prefetch_fields=False).read(list(self._fields)))
+                .with_context(prefetch_fields=False).read(fields_list))
             rule_model.sudo().create_logs(
                 self.env.uid, self._name, self.ids, 'unlink', old_values, None,
                 {'log_type': log_type})
